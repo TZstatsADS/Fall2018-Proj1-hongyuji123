@@ -1,0 +1,350 @@
+---
+title: "HappyDB"
+author: "Hongyu Ji (hj2475)"
+output:
+  html_document: default
+  html_notebook:
+    df_print: paged
+---
+
+# Data Analysis in Happy Moments corpus
+
+##Introduction
+
+Over decades, linguists have shown that language form and language in context could be different in people with different background. Today, I conduct data analysis on HappyDB to explore the variation of written text. HappyDB is a corpus of 100,000 crowd-sourced happy moments which people shared in the past three months or past 24 hours (https://rit-public.github.io/HappyDB/ ). 
+
+In this study, I would like to investigate how the happy moments change among people in different countries with different age and different marital status.
+
+Length and Topics are the main keys in a sentence, therefore I use exploratory data analysis (boxplot, line plot, and scatterplot), word clouds, bigrams and topic modeling to analyze on the two aspects.  
+
+
+HappyDB is a corpus of 100,000 crowd-sourced happy moments via Amazon's Mechanical Turk. You can read more about it on https://arxiv.org/abs/1801.07746.
+
+##Data Precrocessing 
+
+### Step 0 - Load all the required libraries
+
+```{r load libraries, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidytext)
+library(DT)
+library(scales)
+library(wordcloud2)
+library(gridExtra)
+library(ngram)
+library(shiny) 
+```
+
+### Step 1 - Load the processed text data along with demographic information on contributors
+
+We use the processed data for our analysis and combine it with the demographic information available.
+
+```{r load data, warning=FALSE, message=FALSE}
+hm_data <- read_csv("../output/processed_moments.csv")
+
+urlfile<-'https://raw.githubusercontent.com/rit-public/HappyDB/master/happydb/data/demographic.csv'
+demo_data <- read_csv(urlfile)
+```
+
+
+```{r combining data, warning=FALSE, message=FALSE}
+#  Combine both the data sets and keep the required columns for analysis
+#  We select a subset of the data that satisfies specific row conditions.
+hm_data <- hm_data %>%
+  inner_join(demo_data, by = "wid") %>%
+  select(wid,
+         original_hm,
+         gender, 
+         marital, 
+         parenthood,
+         reflection_period,
+         age, 
+         country, 
+         ground_truth_category, 
+         text) %>%
+  mutate(count = sapply(hm_data$text, wordcount)) %>%
+  filter(gender %in% c("m", "f")) %>%
+  filter(marital %in% c("single", "married")) %>%
+  filter(parenthood %in% c("n", "y")) %>%
+  filter(reflection_period %in% c("24h", "3m")) %>%
+  mutate(reflection_period = fct_recode(reflection_period, 
+                                        months_3 = "3m", hours_24 = "24h"))
+```
+
+## Exploratory Data Analysis 
+
+### Countries
+First thing trigered my interest is whether there exists some differences among countries since the writing culture are different in countries. 
+```{r}
+h1 <- hm_data%>%
+  group_by(country)%>%
+  summarize(l=length(country))%>%
+  arrange(desc(l))
+
+head(h1)
+
+h2 <- subset(hm_data, hm_data$country=="USA"|hm_data$country=="IND"|hm_data$country=="VEN"|
+               hm_data$country=="CAN"|hm_data$country=="GBR"|hm_data$country=="PHL")
+```
+
+I select 6 countries with observations are more than 200 as larger observations will have more accurate results. 
+
+```{r}
+ggplot(h2, aes(x = marital, y = count, col = gender))+
+  geom_boxplot()+facet_wrap(~country)+theme_bw()
+```
+
+For Canada, Great British, Philippines, and Venezuela, the distribution of the length of each sentence are approximately the same between married and single; female and maele (almost all within 50 words)
+
+India and USA show some interesting patterns: For India, male used words to describe their happy moments longer than female when they are married. For USA, the count of words have similar pattern in marital and gender, but they tend to talk more compared with other countries.
+
+Therefore, it seems worthwhile to focus on the two countries India and USA. 
+
+Now let's see if age can show us some captivating findings
+
+```{r,warning= FALSE}
+hm_data1 <- subset(hm_data, hm_data$country=="USA"|hm_data$country=="IND")
+h3 <- subset(hm_data1, hm_data1$age != "prefer not to say")
+h3$age <- as.numeric(h3$age)
+h3 <- subset(h3, h3$age!="2" & h3$age!="3" & h3$age!="227" & h3$age!="233")
+```
+
+We remove age with 2, 3, 227, 233 and prefer not to say which could be typo and meaningless message.
+We suspect people have college education or above are willing to write down more words then people who do not have college degree.
+
+We collect some education statistics from wikipedia shows the number of students in college over 60 years. (https://en.wikipedia.org/wiki/Higher_education_in_the_United_States)
+
+```{r}
+year <- c(1950, 1970, 1990, 2009)
+college.degree <- c(432000 + 58200, 827000+ 208000, 1052000 + 325000, 1600000 + 657000 )
+degree.df <- data.frame(year,college.degree)
+ggplot(degree.df, aes(x = year, y = college.degree)) + geom_line() + theme_bw()
+```
+
+The line plot shows an increasing trend in people getting educationsince 1950. In other words, more and more young people nowadays get better education than elder people. 
+
+```{r}
+h4 <- h3%>%
+  group_by(age)%>%
+  summarize(length.avg = mean(count))
+
+h5 <- merge(h3, h4)
+ggplot(h5, aes(x = age, y = count, col = marital)) + 
+  geom_point() + theme_bw()
+
+ggplot(h5, aes(x = age, y = length.avg, col = marital)) + 
+  geom_line(position = position_dodge(width = 1)) + theme_bw()
+```
+
+According to the scatterplot we can see that there's a slow trend of decreasing in words as the age grows older. Especially for people who are younger than 30, there are many of them included more than 100 words in one sentence which match with our guess. 
+
+On the other hand, the average length is about the same throughout the age but there's an obvious different at age 84. 
+
+
+## Word Cloud in different countries with different marital status
+
+
+```{r bag of words, warning=FALSE, message=FALSE}
+set.seed(101)
+
+### Word Cloud with USA & married
+bag_of_words <-  h3 %>%
+  filter(country == "USA", marital == "married")%>%
+  unnest_tokens(word, text)
+
+word_count <- bag_of_words %>%
+  count(word, sort = TRUE)
+
+wordcloud2(word_count, size = 0.6, rotateRatio = 0)
+
+### Word Cloud with USA & single
+bag_of_words <-  h3 %>%
+  filter(country == "USA", marital == "single")%>%
+  unnest_tokens(word, text)
+
+word_count <- bag_of_words %>%
+  count(word, sort = TRUE)
+
+wordcloud2(word_count, size = 0.6, rotateRatio = 0)
+
+### Word Cloud with India & married
+bag_of_words.ind <-  h3 %>%
+  filter(country == "IND" , marital == "married")%>%
+  unnest_tokens(word, text)
+
+word_count.ind <- bag_of_words.ind %>%
+  count(word, sort = TRUE)
+
+wordcloud2(word_count.ind, size = 0.6, rotateRatio = 0)
+### Word Cloud with India & single
+
+bag_of_words.ind <-  h3 %>%
+  filter(country == "IND" , marital == "single")%>%
+  unnest_tokens(word, text)
+
+word_count.ind <- bag_of_words.ind %>%
+  count(word, sort = TRUE)
+
+wordcloud2(word_count.ind, size = 0.6, rotateRatio = 0)
+```
+
+
+From the word clouds we can see, in USA, married people value Time, Daughter and Husband more compared with married people in India where Day, Time, Friend are more important. There is no much different between two countried in single group. Friend, time, day, moment are brought up more frequent. 
+
+## Bigrams between Countries and Marital Status
+
+### Bigram for USA and India
+```{r bigram, warning=FALSE, message=FALSE}
+#Create bigrams using the text data
+hm_bigrams <- h3 %>%
+  filter(count != 1) %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+bigram_counts <- hm_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  count(word1, word2, sort = TRUE)
+```
+
+```{r}
+hm_bigrams %>%
+      count(country, bigram, sort = TRUE) %>%
+      group_by(country) %>%
+      top_n(10) %>%
+      ungroup() %>%
+      mutate(bigram = reorder(bigram, n)) %>%
+      ggplot(aes(bigram, n, fill = country)) +
+      geom_col(show.legend = FALSE) +
+      facet_wrap(~ country, ncol = 2, scales = "free") +
+      coord_flip()
+```
+
+The bigram shows the differences in topics people focus on between India and USA. American put more focus on video game, ice cream, mother day whereas Indian focus more on moment life, day life, birthday party. 
+
+### Bigram for Marital
+
+```{r}
+hm_bigrams %>%
+      count(marital, bigram, sort = TRUE) %>%
+      group_by(marital) %>%
+      top_n(10) %>%
+      ungroup() %>%
+      mutate(bigram = reorder(bigram, n)) %>%
+      ggplot(aes(bigram, n, fill = marital)) +
+      geom_col(show.legend = FALSE) +
+      facet_wrap(~ marital, ncol = 2, scales = "free") +
+      coord_flip()
+```
+
+On the other hand, the most popular words are almost the same in married and single groups. They all value spend time, video games, moment life and ice cream. 
+
+
+## Topic modeling
+### Text Mining
+
+```{r}
+library(tm)
+h.us.m <- subset(h3, h3$country=="USA" & h3$marital == "married")
+h.us.s <- subset(h3, h3$country=="USA" & h3$marital == "single")
+h.in.m <- subset(h3, h3$country=="IND" & h3$marital == "married")
+h.in.s <- subset(h3, h3$country=="IND" & h3$marital == "single")
+
+docs.usa.married <- Corpus(VectorSource(h.us.m$text))
+docs.usa.single <- Corpus(VectorSource(h.us.s$text))
+docs.ind.married <- Corpus(VectorSource(h.in.m$text))
+docs.ind.single <- Corpus(VectorSource(h.in.s$text))
+```
+
+
+```{r}
+# Coverting into a document term matrix
+dtm.usa.married <- DocumentTermMatrix(docs.usa.married)
+dtm.usa.single <- DocumentTermMatrix(docs.usa.single)
+dtm.ind.married <- DocumentTermMatrix(docs.ind.married)
+dtm.ind.single <- DocumentTermMatrix(docs.ind.single)
+
+# Find the sum of words in each Document
+rowTotals.usa.married <- apply(dtm.usa.married, 1, sum)
+rowTotals.usa.single <- apply(dtm.usa.single, 1, sum)
+rowTotals.ind.married <- apply(dtm.ind.married, 1, sum)
+rowTotals.ind.single <- apply(dtm.ind.single, 1, sum)
+dtm.usa.married <- dtm.usa.married[rowTotals.usa.married > 0, ]
+dtm.usa.single <- dtm.usa.single[rowTotals.usa.single > 0,]
+dtm.ind.married <- dtm.ind.married[rowTotals.ind.married > 0,]
+dtm.ind.single <- dtm.ind.single[rowTotals.ind.single > 0,]
+```
+
+### LDA
+Implement Latent Dirichlet Allocation to find the top 10 terms in each topics
+
+```{r}
+library(topicmodels)
+burnin <- 4000
+iter <- 2000
+thin <- 500
+seed <-list(2003,5,63,100001,765)
+nstart <- 5
+best <- TRUE
+#Number of topics
+k <- 10
+#Run LDA using Gibbs sampling
+ldaOut.usa.married <-LDA(dtm.usa.married, k, method="Gibbs", control=list(nstart=nstart, 
+                                                 seed = seed, best=best,
+                                                 burnin = burnin, iter = iter, 
+                                                 thin=thin))
+ldaOut.usa.single <-LDA(dtm.usa.single, k, method="Gibbs", control=list(nstart=nstart, 
+                                                 seed = seed, best=best,
+                                                 burnin = burnin, iter = iter, 
+                                                 thin=thin))
+ldaOut.ind.married <-LDA(dtm.ind.married, k, method="Gibbs", control=list(nstart=nstart, 
+                                                 seed = seed, best=best,
+                                                 burnin = burnin, iter = iter, 
+                                                 thin=thin))
+ldaOut.ind.single <-LDA(dtm.ind.single, k, method="Gibbs", control=list(nstart=nstart, 
+                                                 seed = seed, best=best,
+                                                 burnin = burnin, iter = iter, 
+                                                 thin=thin))
+#docs to topics
+ldaOut.topics.usa.married <- as.matrix(topics(ldaOut.usa.married))
+ldaOut.topics.usa.single <- as.matrix(topics(ldaOut.usa.single))
+ldaOut.topics.ind.married <- as.matrix(topics(ldaOut.ind.married))
+ldaOut.topics.ind.single <- as.matrix(topics(ldaOut.ind.single))
+#top 10 terms in each topic
+ldaOut.terms.usa.married <- as.matrix(terms(ldaOut.usa.married,10))
+ldaOut.terms.usa.single <- as.matrix(terms(ldaOut.usa.single,10))
+ldaOut.terms.ind.married <- as.matrix(terms(ldaOut.ind.married,10))
+ldaOut.terms.ind.single <- as.matrix(terms(ldaOut.ind.single,10))
+ldaOut.terms.usa.married
+```
+
+```{r}
+ldaOut.terms.usa.single
+```
+
+```{r}
+ldaOut.terms.ind.married
+```
+
+```{r}
+ldaOut.terms.ind.single
+```
+
+Some words are used in all four sections, such as family, husband, life. Friends appears more in Indian section.While American have more interest in food, Indian shows more interest in party and song. 
+
+
+
+```{r}
+#write out results
+write.csv(ldaOut.terms.usa.married,file=paste("../output/LDAGibbs",k,"TopicsToTermsUSAMarried.csv"))
+write.csv(ldaOut.terms.usa.single,file=paste("../output/LDAGibbs",k,"TopicsToTermsUSASingle.csv"))
+write.csv(ldaOut.terms.ind.married,file=paste("../output/LDAGibbs",k,"TopicsToTermsINDMarried.csv"))
+write.csv(ldaOut.terms.ind.single,file=paste("../output/LDAGibbs",k,"TopicsToTermsINDSingle.csv"))
+```
+
+## Conclusion
+
+After analying the sentence length and topics in USA and India with different age and different marital status people, we come to the conclusion that age is an intriguing factor: young people tend to write down more words than elder people but on average senior write longer sentences than young people. Marital status and gender do not show much difference. Married American put more life focus on family yet Indian put more focus on enjoying life with friends. 
+
+
+
+
+
